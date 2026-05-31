@@ -16,7 +16,7 @@ from sklearn.cluster import KMeans
 from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import roc_curve, roc_auc_score
 
-ABLATION_ROOT = os.environ.get("CKPT", "/home/nvidia/24PHD1237/FRESH_EXP_20260528_DOMCS_EEG/08_ablation_ELU_FINAL")
+ABLATION_ROOT = "/home/nvidia/24PHD1237/FRESH_EXP_20260528_DOMCS_EEG/08_ablation_ELU_FINAL"
 DATA_NPZ      = os.environ.get("DATA", "/home/nvidia/24PHD1237/EEGMMIDB/EEGMMIDB_win2s_step1s_fs128.npz")
 DEVICE        = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 VARIANTS, SEEDS = ["E1","E2","E3","E4","E5"], [1,2,3,4,5]

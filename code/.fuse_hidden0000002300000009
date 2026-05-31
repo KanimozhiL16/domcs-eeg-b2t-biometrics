@@ -17,7 +17,7 @@ ROOT   = "/home/nvidia/24PHD1237/FRESH_EXP_20260528_DOMCS_EEG"
 DOMCS  = ROOT+"/08_ablation_ELU_FINAL/E1/seed_{}/model_best.pt"          # 5 seeds
 DANN   = "/home/nvidia/24PHD1237/DANN_PHYSIONET_RESULTS/seed_{}/model_best.pt"  # 5 seeds
 CNN    = ROOT+"/12_baseline_adversarial_v2/cnn_arcface_rest_only_best.pt"       # 1 seed
-DATA   = os.environ.get("DATA", "/home/nvidia/24PHD1237/EEGMMIDB/EEGMMIDB_win2s_step1s_fs128.npz")
+DATA   = "/home/nvidia/24PHD1237/EEGMMIDB/EEGMMIDB_win2s_step1s_fs128.npz"
 OUTDIR = ROOT+"/R3_stats"; os.makedirs(OUTDIR, exist_ok=True)
 DEV    = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 K, SEEDS = 3, [1,2,3,4,5]

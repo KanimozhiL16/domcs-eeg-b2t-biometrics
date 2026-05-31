@@ -16,7 +16,7 @@ mpl.rcParams.update({"pdf.fonttype":42,"ps.fonttype":42,"font.family":"sans-seri
 COL,HALF=7.16,3.5; CB=["#0072B2","#D55E00","#009E73","#CC79A7","#E69F00","#56B4E9"]
 ROOT="/home/nvidia/24PHD1237/FRESH_EXP_20260528_DOMCS_EEG"
 CKPT=f"{ROOT}/08_ablation_ELU_FINAL/E1/seed_3/model_best.pt"
-DATA=os.environ.get("DATA", "/home/nvidia/24PHD1237/EEGMMIDB/EEGMMIDB_win2s_step1s_fs128.npz")
+DATA="/home/nvidia/24PHD1237/EEGMMIDB/EEGMMIDB_win2s_step1s_fs128.npz"
 OUT=f"{ROOT}/figures_TIFS"; os.makedirs(OUT,exist_ok=True)
 DEV=torch.device("cuda:0" if torch.cuda.is_available() else "cpu"); K=3; RNG=np.random.default_rng(0)
 def save(fig,n): fig.savefig(f"{OUT}/{n}.pdf"); fig.savefig(f"{OUT}/{n}.png",dpi=300); plt.close(fig); print(f"  saved {n}")
