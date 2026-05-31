@@ -22,5 +22,6 @@ __pycache__/
 *.tmp
 _mvtest_*
 
-# NOTE: model checkpoints (*.pt, ~42 MB total) ARE intentionally committed —
-# they are small and required to reproduce results without retraining.
+# --- OneDrive/FUSE temporary lock files (must never be committed) ---
+.fuse_hidden*
+**/.fuse_hidden*
