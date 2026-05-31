@@ -22,6 +22,11 @@ __pycache__/
 *.tmp
 _mvtest_*
 
+# --- Excluded from the package (GELU lineage; superseded) ---
+# Kept on local disk only (OneDrive-locked, cannot delete); must never be tracked.
+code/06_eval_per_task_eer.py
+06_eval_per_task_eer.py
+
 # --- OneDrive/FUSE temporary lock files (must never be committed) ---
 .fuse_hidden*
 **/.fuse_hidden*
