@@ -1,0 +1,26 @@
+# --- Never commit large data to GitHub (100 MB/file limit) ---
+# Preprocessed EEG arrays are 9.9 GB — host on Zenodo/IEEE DataPort, not GitHub.
+*.npz
+*.npy
+*.mat
+*.h5
+*.hdf5
+*.edf
+data/*.npz
+data/*.mat
+
+# --- BED is license-restricted: never commit any BED data array ---
+*BED*win*.npz
+*bed*win*.npz
+BED_DATASET/
+
+# --- Python / OS junk ---
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.DS_Store
+*.tmp
+_mvtest_*
+
+# NOTE: model checkpoints (*.pt, ~42 MB total) ARE intentionally committed —
+# they are small and required to reproduce results without retraining.

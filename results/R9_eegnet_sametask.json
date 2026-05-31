@@ -1,0 +1,12 @@
+{
+  "id_acc_mean_std": [
+    98.79715165511932,
+    0.3309217465166754
+  ],
+  "verif_eer_mean_std": [
+    2.6327677273116072,
+    0.15343496923428854
+  ],
+  "b2t_eer_reference": 47.88,
+  "note": "EEGNet same-task; B2T collapse is protocol-driven"
+}

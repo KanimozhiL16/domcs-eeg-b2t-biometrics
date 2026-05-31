@@ -1,0 +1,9 @@
+[E5/seed1/GPU4] Loading data...
+  [E5/s1/G4] ep 10 train=0.1608 val=0.34105 best_ep=10 1.4min
+  [E5/s1/G4] ep 20 train=0.1422 val=0.26881 best_ep=20 2.6min
+  [E5/s1/G4] ep 30 train=0.1312 val=0.24812 best_ep=30 3.8min
+  [E5/s1/G4] ep 40 train=0.1172 val=0.21094 best_ep=39 5.0min
+  [E5/s1/G4] ep 50 train=0.1110 val=0.19387 best_ep=48 6.3min
+  [E5/s1/G4] ep 60 train=0.1075 val=0.18556 best_ep=60 7.6min
+  [E5/s1/G4] ✓ DONE best_ep=60 val=0.18556 total=7.6min
+  SAVED: /home/nvidia/24PHD1237/FRESH_EXP_20260528_DOMCS_EEG/08_ablation_ELU_FINAL/E5/seed_1/model_best.pt

@@ -1,0 +1,87 @@
+{
+  "cos_per_variant": {
+    "E1 (Full DOMCS-EEG)": {
+      "eer": 2.62,
+      "cos": 0.0642227753996849,
+      "has_state": true
+    },
+    "E2 (No Orth Loss)": {
+      "eer": 2.59,
+      "cos": 0.05387658625841141,
+      "has_state": true
+    },
+    "E3 (No SupCon)": {
+      "eer": 3.04,
+      "cos": 0.06723180413246155,
+      "has_state": true
+    },
+    "E4 (No State Branch)": {
+      "eer": 2.62,
+      "cos": null,
+      "has_state": false
+    },
+    "E5 (ArcFace Only)": {
+      "eer": 7.64,
+      "cos": null,
+      "has_state": false
+    }
+  },
+  "per_task_eer": {
+    "Left Fist": {
+      "runs": [
+        "R03",
+        "R07",
+        "R11"
+      ],
+      "eers": [
+        1.0671,
+        2.5718,
+        2.5476
+      ],
+      "mean": 2.0621666666666667,
+      "std": 0.8618379565401686
+    },
+    "Right Fist": {
+      "runs": [
+        "R04",
+        "R08",
+        "R12"
+      ],
+      "eers": [
+        1.1398,
+        2.7437,
+        2.4041
+      ],
+      "mean": 2.0958666666666663,
+      "std": 0.8452098220757573
+    },
+    "Both Fists": {
+      "runs": [
+        "R05",
+        "R09",
+        "R13"
+      ],
+      "eers": [
+        1.5597,
+        2.489,
+        3.3421
+      ],
+      "mean": 2.4636,
+      "std": 0.8914714297160621
+    },
+    "Both Feet": {
+      "runs": [
+        "R06",
+        "R10",
+        "R14"
+      ],
+      "eers": [
+        1.1083,
+        3.1914,
+        2.7795
+      ],
+      "mean": 2.3597333333333332,
+      "std": 1.1031679125742069
+    }
+  }
+}

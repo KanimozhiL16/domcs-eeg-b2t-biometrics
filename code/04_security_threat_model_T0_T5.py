@@ -1,0 +1,275 @@
+#!/usr/bin/env python3
+# =====================================================================================
+#  R2 — SECURITY THREAT BATTERY T0-T5   DOMCS-EEG (E1 ELU)  vs  CNN+ArcFace baseline
+#  Why: a biometric system must be hard to ATTACK, not just accurate. We escalate
+#  through 6 threat models and report EER/AUC under each, on BOTH models, to show
+#  DOMCS degrades less. Weak baselines (EEGNet etc, ~48% clean EER) are excluded —
+#  attacking an already-broken model proves nothing.
+#
+#  Shared setup: gallery = REST(R01-R02) KMeans K=3/subject; probe = TASK(R03-R14);
+#  score = max cosine(probe, claimed subject's K prototypes). Genuine = own subject;
+#  impostor = another subject. EER = threshold where FAR==FRR (lower = more secure).
+#
+#  Scoring (declared, do not mix):
+#    T0-T3 = EXHAUSTIVE all-impostor (every probe vs ALL other subjects) — matches R1.
+#    T4-T5 = TARGETED 1-vs-1 (each probe attacks ONE identity) — correct for a white-box
+#            attacker who impersonates a specific person.
+#  Security analysis on representative seed_3 (DOMCS). For 5-seed security, loop seeds.
+#  Each threat self-verifies with asserts; on failure the script STOPS (no bad numbers).
+#  8 GPUs via nn.DataParallel. T4-T5 attack a declared 10k stratified probe subset.
+# =====================================================================================
+import os, json, time, numpy as np, torch, torch.nn as nn, torch.nn.functional as F
+from sklearn.cluster import KMeans
+from sklearn.metrics import roc_curve, roc_auc_score
+import matplotlib; matplotlib.use("Agg"); import matplotlib.pyplot as plt
+
+ROOT      = "/home/nvidia/24PHD1237/FRESH_EXP_20260528_DOMCS_EEG"
+DOMCS_CKPT= f"{ROOT}/08_ablation_ELU_FINAL/E1/seed_3/model_best.pt"
+BASE_CKPT = f"{ROOT}/12_baseline_adversarial_v2/cnn_arcface_rest_only_best.pt"
+DATA_NPZ  = "/home/nvidia/24PHD1237/EEGMMIDB/EEGMMIDB_win2s_step1s_fs128.npz"
+OUTDIR    = f"{ROOT}/R2_security"; os.makedirs(OUTDIR, exist_ok=True)
+DEVICE    = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+NGPU      = torch.cuda.device_count()
+K         = 3
+ADV_SUBSET= 10000
+EPS_LIST  = [0.001,0.002,0.003,0.005,0.007,0.010]
+PGD_STEPS, PGD_ALPHA = 10, 0.001
+T5_N, T5_EPS, T5_STEPS = 200, 0.01, 10
+RNG = np.random.default_rng(42)
+print(f"Devices: {NGPU} GPU(s)")
+
+# ----------------------------- ARCHITECTURES -----------------------------
+# DOMCS (worker verbatim, ELU). forward returns z_id ONLY (identity embedding).
+class ConvBlock(nn.Module):
+    def __init__(s,ic,oc,k):
+        super().__init__(); s.net=nn.Sequential(nn.Conv1d(ic,oc,k,padding=k//2,bias=False),
+                                                nn.BatchNorm1d(oc),nn.ELU(inplace=True))
+    def forward(s,x): return s.net(x)
+def _enc(): return nn.Sequential(ConvBlock(64,64,7),ConvBlock(64,128,5),
+                                 ConvBlock(128,256,3),nn.AdaptiveAvgPool1d(1))
+class DOMCSStandard(nn.Module):
+    def __init__(s):
+        super().__init__(); s.enc=_enc()
+        s.id_fc=nn.Linear(256,128,bias=False); s.id_n=nn.LayerNorm(128)
+        s.st_fc=nn.Linear(256,128,bias=False); s.st_n=nn.LayerNorm(128)
+    def forward(s,x):
+        f=s.enc(x).squeeze(-1); return F.normalize(s.id_n(s.id_fc(f)),dim=-1)
+# CNN+ArcFace baseline (verbatim from Cell_11_V4): same ELU stack, no state branch.
+class CB2(nn.Module):
+    def __init__(s,ic,oc,k,p):
+        super().__init__(); s.net=nn.Sequential(nn.Conv1d(ic,oc,k,padding=p,bias=False),
+                                                nn.BatchNorm1d(oc),nn.ELU())
+    def forward(s,x): return s.net(x)
+class CNNArcFaceBaseline(nn.Module):
+    def __init__(s):
+        super().__init__()
+        s.conv1=CB2(64,64,7,3); s.conv2=CB2(64,128,5,2); s.conv3=CB2(128,256,3,1)
+        s.pool=nn.AdaptiveAvgPool1d(1); s.fc=nn.Linear(256,128,bias=False); s.norm=nn.LayerNorm(128)
+    def forward(s,x):
+        f=s.pool(s.conv3(s.conv2(s.conv1(x)))).squeeze(-1)
+        return F.normalize(s.norm(s.fc(f)),dim=1)
+
+def load_domcs():
+    ck=torch.load(DOMCS_CKPT,map_location=DEVICE,weights_only=False)
+    assert ck.get("activation")=="ELU", f"DOMCS not ELU: {ck.get('activation')}"
+    m=DOMCSStandard(); m.load_state_dict(ck["model_state"],strict=True); m.eval().to(DEVICE)
+    print("  DOMCS-EEG E1 ELU loaded (strict)"); return m
+def load_baseline():
+    if not os.path.exists(BASE_CKPT):
+        print(f"  WARN baseline ckpt missing: {BASE_CKPT} -> DOMCS-only"); return None
+    ck=torch.load(BASE_CKPT,map_location=DEVICE,weights_only=False)
+    m=CNNArcFaceBaseline(); res=m.load_state_dict(ck["model_state"],strict=False)
+    assert res.missing_keys==[], f"baseline missing keys: {res.missing_keys}"
+    m.eval().to(DEVICE); print("  CNN+ArcFace baseline loaded"); return m
+def wrap(m): return nn.DataParallel(m) if (m is not None and NGPU>1) else m
+
+# ----------------------------- DATA + SCORING -----------------------------
+d=np.load(DATA_NPZ,allow_pickle=True)
+X=d["X"].astype(np.float32); y=d["y"].astype(np.int64)
+sess=np.array([int(str(s).lstrip("Rr")) for s in d["session"]],dtype=np.int64)
+rest=np.isin(sess,[1,2]); task=~rest; r01=(sess==1); r02=(sess==2)
+SUBJ=sorted(np.unique(y)); subj2idx={s:i for i,s in enumerate(SUBJ)}; NSUB=len(SUBJ)
+print(f"data: {len(X)} win | REST={rest.sum()} TASK={task.sum()} | subj={NSUB} | seed_3 representative")
+
+@torch.no_grad()
+def embed(emb,Xnp,bs=4096):
+    o=[]
+    for i in range(0,len(Xnp),bs):
+        o.append(emb(torch.from_numpy(Xnp[i:i+bs]).to(DEVICE)).cpu().numpy())
+    return np.concatenate(o)
+
+def gallery_from(emb,maskX,maskY):
+    z=embed(emb,maskX); G=np.zeros((NSUB,K,128),np.float32)
+    for s in SUBJ:
+        c=KMeans(K,n_init=10,random_state=0).fit(z[maskY==s]).cluster_centers_
+        G[subj2idx[s]]=c/(np.linalg.norm(c,axis=1,keepdims=True)+1e-12)
+    return G
+
+def eer_auc_thr(gen,imp):
+    sc=np.r_[gen,imp].astype(np.float64); lb=np.r_[np.ones_like(gen),np.zeros_like(imp)]
+    fpr,tpr,thr=roc_curve(lb,sc); fnr=1-tpr; i=np.nanargmin(np.abs(fnr-fpr))
+    return (fpr[i]+fnr[i])/2*100, float(roc_auc_score(lb,sc)), float(thr[i])
+
+def exhaustive(zt,yt,G):                 # each probe vs OWN subj (gen) + ALL others (imp)
+    Gt=torch.tensor(G.reshape(NSUB*K,128),device=DEVICE); P=torch.tensor(zt,device=DEVICE)
+    gen=[]; imp=[]
+    with torch.no_grad():
+        for i in range(0,len(P),8192):
+            S=(P[i:i+8192]@Gt.T).view(-1,NSUB,K).max(2).values.cpu().numpy()
+            yb=yt[i:i+8192]; rows=np.arange(len(yb)); gi=np.array([subj2idx[s] for s in yb])
+            gen.append(S[rows,gi]); M=S.copy(); M[rows,gi]=np.nan; imp.append(M[~np.isnan(M)])
+    return np.concatenate(gen),np.concatenate(imp)
+
+def adv_subset(cap=ADV_SUBSET):
+    idx=np.where(task)[0]; per=max(1,cap//NSUB); sel=[]
+    for s in SUBJ:
+        si=idx[y[idx]==s]; sel+=list(RNG.choice(si,min(per,len(si)),replace=False))
+    sel=np.array(sel); return X[sel],y[sel]
+
+# Batched FGSM/PGD (same math as Cell_9A): direction +1=impostor(ascend cos to target),
+# -1=genuine(descend cos from own gallery). pgd=False -> single FGSM step.
+def attack(emb,x,protos,eps,direction,pgd,steps=PGD_STEPS,alpha=PGD_ALPHA):
+    protos=torch.tensor(protos,device=DEVICE); x0=x.clone(); xa=x.clone()
+    for _ in range(steps if pgd else 1):
+        xa=xa.detach().requires_grad_(True)
+        sim=torch.einsum('bd,bkd->bk',emb(xa),protos).max(1).values
+        sim.mean().backward()
+        step=alpha if pgd else eps
+        xa=xa+direction*step*xa.grad.sign()
+        xa=(x0+(xa-x0).detach().clamp(-eps,eps)).detach() if pgd else xa.detach()
+    return xa.detach()
+
+# ----------------------------- THREATS -----------------------------
+def T0(emb,G):
+    # T0 ZERO-EFFORT FORGERY: attacker presents a random other person's EEG, no effort.
+    # Exhaustive cross-subject impostors. Security floor (~= clean verification EER).
+    gen,imp=exhaustive(embed(emb,X[task]),y[task],G); e,a,t=eer_auc_thr(gen,imp)
+    assert 0<e<15, f"T0 EER insane: {e}"; return dict(eer=e,auc=a,thr=t)
+
+def T1(emb):
+    # T1 SAME-STATE CROSS-SUBJECT FORGERY (held-out, no enrollment contamination).
+    # Paper definition: "T1 evaluates same-state cross-subject forgery, where attackers use
+    # held-out REST recordings from other subjects (R02) to impersonate a target enrolled
+    # using REST data (R01). This tests whether knowledge of the enrollment cognitive state
+    # improves impersonation success." gallery=R01; genuine probe=own R02; impostor=other
+    # subjects' R02 vs target R01 (exhaustive). R01/R02 disjoint => no leakage. T1~=T0 means
+    # knowing the enrolled state gives the attacker little advantage.
+    G1=gallery_from(emb,X[r01],y[r01])
+    gen,imp=exhaustive(embed(emb,X[r02]),y[r02],G1); e,a,_=eer_auc_thr(gen,imp)
+    return dict(eer=e,auc=a,note="R01 gallery -> R02 held-out probe")
+
+def T2(emb,Gc):
+    # T2 ENROLLMENT-LEAKAGE SENSITIVITY (robustness test, NOT an attack): a fraction of a
+    # subject's OWN genuine TASK windows leaks into THEIR gallery. This augments enrollment;
+    # it cannot impersonate anyone. Expected (desirable): EER drops. Reported as a curve.
+    zt=embed(emb,X[task]); zr=embed(emb,X[rest]); yr=y[rest]; res={}
+    for frac in [0.10,0.25,0.50,1.00]:
+        G=Gc.copy()
+        for s in SUBJ:
+            ti=np.where(y[task]==s)[0]; n=int(frac*len(ti))
+            pool=np.r_[zr[yr==s],zt[RNG.choice(ti,n,replace=False)]] if n>0 else zr[yr==s]
+            c=KMeans(K,n_init=10,random_state=0).fit(pool).cluster_centers_
+            G[subj2idx[s]]=c/(np.linalg.norm(c,axis=1,keepdims=True)+1e-12)
+        gen,imp=exhaustive(zt,y[task],G); e,a,_=eer_auc_thr(gen,imp); res[f"{int(frac*100)}%"]=dict(eer=e,auc=a)
+    return res
+
+def T3(emb,G):
+    # T3 ACQUISITION-NOISE ROBUSTNESS: corrupt TASK probes with AWGN (SNR 30/20/10/5 dB)
+    # and 50/60 Hz powerline, re-embed, re-score. Expected: EER rises as SNR falls.
+    Xt=X[task]; yt=y[task]; sp=np.mean(Xt**2); res={}
+    for snr in [30,20,10,5]:
+        Xn=Xt+RNG.normal(0,np.sqrt(sp/10**(snr/10)),Xt.shape).astype(np.float32)
+        gen,imp=exhaustive(embed(emb,Xn),yt,G); e,a,_=eer_auc_thr(gen,imp); res[f"AWGN_{snr}dB"]=dict(eer=e,auc=a)
+    t=np.arange(Xt.shape[-1])/128.0
+    for f0 in [50,60]:
+        Xn=Xt+(0.1*np.sin(2*np.pi*f0*t)).astype(np.float32)[None,None,:]
+        gen,imp=exhaustive(embed(emb,Xn),yt,G); e,a,_=eer_auc_thr(gen,imp); res[f"powerline_{f0}Hz"]=dict(eer=e,auc=a)
+    assert res["AWGN_5dB"]["eer"]>=res["AWGN_30dB"]["eer"]-0.5, "T3 not monotone"
+    return res
+
+def T4(emb,G,Xs,ys):
+    # T4 WHITE-BOX ADVERSARIAL (FGSM+PGD), targeted 1-vs-1. Two attacks per probe:
+    # impostor impersonation (push toward a chosen target) + genuine evasion (push from own).
+    # Both raise EER. Claim: disentangled identity manifold (DOMCS) is tighter => smaller
+    # EER increase than baseline at each eps = more adversarially robust.
+    tgt=np.array([RNG.choice([j for j in range(NSUB) if j!=subj2idx[s]]) for s in ys])
+    own=np.array([subj2idx[s] for s in ys]); res={}
+    for atk,pgd in [("FGSM",False),("PGD",True)]:
+        row={}
+        for eps in EPS_LIST:
+            ga=[]; ia=[]
+            for i in range(0,len(Xs),2048):
+                xb=torch.from_numpy(Xs[i:i+2048]).to(DEVICE)
+                xg=attack(emb,xb,G[own[i:i+2048]],eps,-1,pgd)
+                xi=attack(emb,xb,G[tgt[i:i+2048]],eps,+1,pgd)
+                with torch.no_grad(): zg=emb(xg).cpu().numpy(); zi=emb(xi).cpu().numpy()
+                ga+=[float(np.max(zg[j]@G[own[i+j]].T)) for j in range(len(zg))]
+                ia+=[float(np.max(zi[j]@G[tgt[i+j]].T)) for j in range(len(zi))]
+            e,a,_=eer_auc_thr(np.array(ga),np.array(ia)); row[eps]=dict(eer=e,auc=a)
+        assert row[EPS_LIST[-1]]["eer"]>=row[EPS_LIST[0]]["eer"]-0.3, f"T4 {atk} non-increasing"
+        res[atk]=row
+    return res
+
+def T5(emb,G,Xs,ys,thr):
+    # T5 TARGETED IMPERSONATION SUCCESS RATE: for N (impostor,target) pairs, run PGD to push
+    # the impostor past the clean acceptance threshold. TSR = % successful (score>thr).
+    # Lower TSR = harder to impersonate. White-box worst case.
+    pick=RNG.choice(len(Xs),min(T5_N,len(Xs)),replace=False); succ=0; sc=[]
+    for j in pick:
+        t=RNG.choice([k for k in range(NSUB) if k!=subj2idx[ys[j]]])
+        xa=attack(emb,torch.from_numpy(Xs[j:j+1]).to(DEVICE),G[t][None],T5_EPS,+1,True,steps=T5_STEPS)
+        with torch.no_grad(): z=emb(xa).cpu().numpy()[0]
+        s=float(np.max(z@G[t].T)); sc.append(s); succ+=(s>thr)
+    return dict(TSR=100*succ/len(pick),n=len(pick),thr=thr,mean_score=float(np.mean(sc)))
+
+# ----------------------------- RUN -----------------------------
+MODELS={}
+dm=load_domcs(); MODELS["DOMCS-EEG"]=wrap(dm)
+bl=load_baseline()
+if bl is not None: MODELS["CNN+ArcFace"]=wrap(bl)
+Xs,ys=adv_subset(); print(f"adversarial subset: {len(Xs)} windows (stratified, declared)\n")
+
+ALL={}
+for tag,emb in MODELS.items():
+    print(f"========  {tag}  ========"); t0=time.time()
+    G=gallery_from(emb,X[rest],y[rest])
+    ce,ca,ct=eer_auc_thr(*exhaustive(embed(emb,X[task]),y[task],G))
+    print(f"  clean EER={ce:.3f}% AUC={ca:.4f} thr={ct:.4f}")
+    r={"clean":dict(eer=ce,auc=ca,thr=ct)}
+    r["T0"]=T0(emb,G);                print(f"  T0 random    EER={r['T0']['eer']:.3f}%")
+    r["T1"]=T1(emb);                  print(f"  T1 sameState EER={r['T1']['eer']:.3f}% (R01->R02 held-out)")
+    r["T2"]=T2(emb,G);                print(f"  T2 leak-sens 100% EER={r['T2']['100%']['eer']:.3f}% (robustness)")
+    r["T3"]=T3(emb,G);                print(f"  T3 AWGN20={r['T3']['AWGN_20dB']['eer']:.3f}% 10dB={r['T3']['AWGN_10dB']['eer']:.3f}%")
+    r["T4"]=T4(emb,G,Xs,ys);          print(f"  T4 FGSM@.01={r['T4']['FGSM'][0.010]['eer']:.3f}% PGD@.01={r['T4']['PGD'][0.010]['eer']:.3f}%")
+    r["T5"]=T5(emb,G,Xs,ys,ct);       print(f"  T5 TSR={r['T5']['TSR']:.1f}% ({time.time()-t0:.0f}s)")
+    ALL[tag]=r
+
+json.dump(ALL,open(f"{OUTDIR}/R2_security_results.json","w"),indent=2,default=float)
+print(f"\nSaved -> {OUTDIR}/R2_security_results.json")
+
+# ----------------------------- VISUALIZE + INTERPRET -----------------------------
+fig,ax=plt.subplots(1,2,figsize=(12,4.5))
+for tag,r in ALL.items():
+    ax[0].plot(EPS_LIST,[r["T4"]["PGD"][e]["eer"] for e in EPS_LIST],marker='o',label=tag)
+ax[0].set_title("T4 PGD EER vs epsilon"); ax[0].set_xlabel("eps (Linf)"); ax[0].set_ylabel("EER %")
+ax[0].legend(); ax[0].grid(alpha=.3)
+labs=["clean","T0","T1","T2.100","T3.20dB","T4.PGD.01","T5.TSR"]
+for tag,r in ALL.items():
+    ax[1].plot(labs,[r["clean"]["eer"],r["T0"]["eer"],r["T1"]["eer"],r["T2"]["100%"]["eer"],
+               r["T3"]["AWGN_20dB"]["eer"],r["T4"]["PGD"][0.010]["eer"],r["T5"]["TSR"]],marker='s',label=tag)
+ax[1].set_title("Security summary (EER%, T5=TSR%)"); ax[1].tick_params(axis='x',rotation=30)
+ax[1].legend(); ax[1].grid(alpha=.3); plt.tight_layout()
+plt.savefig(f"{OUTDIR}/FIG_R2_security.pdf"); plt.savefig(f"{OUTDIR}/FIG_R2_security.png",dpi=150)
+print(f"Figure -> {OUTDIR}/FIG_R2_security.png")
+
+print("\n========  INTERPRETATION  ========")
+if "CNN+ArcFace" in ALL:
+    D=ALL["DOMCS-EEG"]; B=ALL["CNN+ArcFace"]
+    dd=D["T4"]["PGD"][0.010]["eer"]-D["clean"]["eer"]; bd=B["T4"]["PGD"][0.010]["eer"]-B["clean"]["eer"]
+    print(f"  PGD@.01 degradation: DOMCS +{dd:.2f}pp vs CNN+ArcFace +{bd:.2f}pp")
+    print("  -> DOMCS more robust" if dd<bd else "  -> baseline more robust (investigate)")
+    print(f"  TSR: DOMCS {D['T5']['TSR']:.1f}% vs CNN+ArcFace {B['T5']['TSR']:.1f}%")
+    print("  -> DOMCS harder to impersonate" if D["T5"]["TSR"]<B["T5"]["TSR"] else "  -> baseline harder")
+print("  T1 vs T0: low same-state impostor foothold = state knowledge gives no advantage.")
+print("  T2 EER falls with leaked genuine data = robustness, NOT an impersonation threat.")
+print("\nDONE. Confirm no AssertionError above (each threat self-verified).")
